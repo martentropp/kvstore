@@ -21,6 +21,7 @@ type Node struct {
     store       *store.KVStore
     peers       map[string]string            // nodeID -> address
     trustedKeys map[string]ed25519.PublicKey // nodeID -> pubkey
+	logFile     string
     mu          sync.RWMutex
 }
 
@@ -98,8 +99,22 @@ func (n *Node) handleMessage(msg *Message) *Message {
         return n.handleReplicate(msg.Entry)
     case MsgGetKey:
         return n.handleGet(msg.Key)
+	case MsgHeadHash:
+		h, l := n.headHash()
+		return &Message{Success: true, Hash: h, Length: l}
+	case MsgGetChain:
+    	return &Message{Success: true, Entries: n.chain.Entries()}
     default:
         return &Message{Success: false, Error: "unknown message type"}
+    }
+}
+
+func (n *Node) persistIfConfigured() {
+    if n.logFile == "" {
+        return
+    }
+    if err := n.chain.SaveToFile(n.logFile); err != nil {
+        fmt.Printf("[%s] warning: could not persist chain: %v\n", n.ID, err)
     }
 }
 
@@ -109,6 +124,7 @@ func (n *Node) handleWrite(key, value string) *Message {
 
     // replicate to all peers
     go n.broadcast(entry)
+	n.persistIfConfigured()
 
     return &Message{Success: true, Entry: entry}
 }
@@ -123,6 +139,8 @@ func (n *Node) handleReplicate(entry *log.LogEntry) *Message {
     }
 
     n.store.Set(entry.Key, entry.Value)
+	n.persistIfConfigured()
+
     return &Message{Success: true}
 }
 
@@ -200,4 +218,81 @@ func (n *Node) ChainLen() int {
 
 func TempKeyPair() (*crypto.KeyPair, error) {
     return crypto.GenerateKeyPair()
+}
+
+func (n *Node) headHash() (string, int) {
+    entries := n.chain.Entries()
+    if len(entries) == 0 {
+        return "genesis", 0
+    }
+
+    return entries[len(entries)-1].Hash(), len(entries)
+}
+
+func (n *Node) CheckDivergence() {
+    localHash, localLen := n.headHash()
+
+    n.mu.RLock()
+    peers := make(map[string]string)
+    for id, addr := range n.peers {
+        peers[id] = addr
+    }
+
+    n.mu.RUnlock()
+
+    diverged := false
+    for peerID, addr := range peers {
+        msg := &Message{
+            Type:   MsgHeadHash,
+            NodeID: n.ID,
+            Hash:   localHash,
+            Length: localLen,
+        }
+
+        resp, err := n.Send(addr, msg)
+        if err != nil {
+            fmt.Printf("[%s] could not reach %s for divergence check\n", n.ID, peerID)
+            continue
+        }
+
+        if resp.Length != localLen {
+            fmt.Printf("[%s] WARNING: chain length mismatch with %s — local=%d peer=%d\n",
+                n.ID, peerID, localLen, resp.Length)
+            diverged = true
+            continue
+        }
+
+        if resp.Hash != localHash {
+            fmt.Printf("[%s] CRITICAL: chain divergence detected with %s!\n", n.ID, peerID)
+            fmt.Printf("  local head:  %s\n", localHash)
+            fmt.Printf("  peer head:   %s\n", resp.Hash)
+            diverged = true
+        }
+    }
+
+    if !diverged {
+        fmt.Printf("[%s] divergence check passed — all peers agree\n", n.ID)
+    }
+}
+
+func (n *Node) WithLogFile(path string) {
+    n.logFile = path
+}
+
+func (n *Node) LoadLog(path string) error {
+    n.logFile = path
+    n.mu.RLock()
+    trusted := n.trustedKeys
+    n.mu.RUnlock()
+
+    if err := n.chain.LoadFromFile(path, trusted); err != nil {
+        return err
+    }
+
+    // replay the chain into the KV store
+    for _, entry := range n.chain.Entries() {
+        n.store.Set(entry.Key, entry.Value)
+    }
+
+    return nil
 }

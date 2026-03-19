@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"kvstore/internal/config"
 	"kvstore/internal/crypto"
 	"kvstore/internal/network"
 	"os"
@@ -15,42 +16,88 @@ import (
 )
 
 func main() {
-	// command line parsing
-    id   := flag.String("id", "", "node ID (e.g. node1)")
-    addr := flag.String("addr", "", "address to listen on (e.g. localhost:9001)")
-    keyFile := flag.String("key", "", "path to key file (created if missing)")
+    id         := flag.String("id", "", "node ID (must match config)")
+    configPath := flag.String("config", "config.json", "path to config file")
     flag.Parse()
 
-	// verify correct usage
-    if *id == "" || *addr == "" || *keyFile == "" {
-        fmt.Println("usage: node -id <id> -addr <addr> -key <keyfile>")
+    if *id == "" {
+        fmt.Println("usage: node -id <id> [-config config.json]")
         os.Exit(1)
     }
 
-    // load or generate keypair
-    kp, err := crypto.LoadFromFile(*keyFile)
+    cfg, err := config.Load(*configPath)
     if err != nil {
-        fmt.Printf("[%s] generating new keypair -> %s\n", *id, *keyFile)
+        fmt.Println("failed to load config:", err)
+        os.Exit(1)
+    }
+
+    self := cfg.FindSelf(*id)
+    if self == nil {
+        fmt.Printf("node %q not found in config\n", *id)
+        os.Exit(1)
+    }
+
+    // Load or generate keypair
+    kp, err := crypto.LoadFromFile(self.KeyFile)
+    if err != nil {
+        fmt.Printf("[%s] generating new keypair -> %s\n", *id, self.KeyFile)
         kp, err = crypto.GenerateKeyPair()
         if err != nil {
             fmt.Println("failed to generate keypair:", err)
             os.Exit(1)
         }
 
-        kp.SaveToFile(*keyFile)
+        kp.SaveToFile(self.KeyFile)
     }
 
-    fmt.Printf("[%s] public key: %s\n", *id, hex.EncodeToString(kp.Public))
+    pubHex := hex.EncodeToString(kp.Public)
 
-    node := network.NewNode(*id, *addr, kp)
+    // If this node's pubkey isn't in the config yet, write it in
+    if self.PubKey == "" {
+        self.PubKey = pubHex
+        if err := cfg.Save(*configPath); err != nil {
+            fmt.Println("warning: could not save pubkey to config:", err)
+        } else {
+            fmt.Printf("[%s] saved public key to config\n", *id)
+        }
+    }
+
+    fmt.Printf("[%s] public key: %s\n", *id, pubHex)
+
+    node := network.NewNode(*id, self.Addr, kp)
+
+    // Register all peers that have a pubkey in the config
+    registered := 0
+    for _, peer := range cfg.Peers(*id) {
+        if peer.PubKey == "" {
+            fmt.Printf("[%s] skipping peer %s — no pubkey in config yet\n", *id, peer.ID)
+            continue
+        }
+        pubBytes, err := hex.DecodeString(peer.PubKey)
+        if err != nil {
+            fmt.Printf("[%s] invalid pubkey for peer %s\n", *id, peer.ID)
+            continue
+        }
+        node.AddPeer(peer.ID, peer.Addr, ed25519.PublicKey(pubBytes))
+        fmt.Printf("[%s] registered peer %s\n", *id, peer.ID)
+        registered++
+    }
+
+    fmt.Printf("[%s] %d peers registered\n", *id, registered)
+
+	logFile := *id + ".log"
+	if err := node.LoadLog(logFile); err != nil {
+		fmt.Println("warning: could not load log:", err)
+	} else {
+		fmt.Printf("[%s] chain replayed — %d entries\n", *id, node.ChainLen())
+	}
 
     if err := node.Start(); err != nil {
         fmt.Println("failed to start node:", err)
         os.Exit(1)
     }
 
-    // interactive peer registration + commands
-    fmt.Println("commands: peer <id> <addr> <pubkey> | verify | quit")
+    fmt.Println("commands: verify | divergence | quit")
     scanner := bufio.NewScanner(os.Stdin)
     for scanner.Scan() {
         line := strings.TrimSpace(scanner.Text())
@@ -60,35 +107,21 @@ func main() {
         }
 
         switch parts[0] {
-        case "peer":
-            if len(parts) != 4 {
-                fmt.Println("usage: peer <id> <addr> <pubkey>")
-                continue
-            }
-            pubBytes, err := hex.DecodeString(parts[3])
-            if err != nil {
-                fmt.Println("invalid pubkey hex")
-                continue
-            }
-            node.AddPeer(parts[1], parts[2], ed25519.PublicKey(pubBytes))
-            fmt.Printf("added peer %s at %s\n", parts[1], parts[2])
-
         case "verify":
             if err := node.VerifyChain(); err != nil {
                 fmt.Println("CHAIN INVALID:", err)
             } else {
                 fmt.Println("chain OK —", node.ChainLen(), "entries")
             }
-
         case "quit":
             os.Exit(0)
-
+		case "divergence":
+    		node.CheckDivergence()
         default:
             fmt.Println("unknown command")
         }
     }
 
-    // handle Ctrl + C
     sig := make(chan os.Signal, 1)
     signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
     <-sig

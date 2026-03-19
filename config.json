@@ -1,0 +1,22 @@
+{
+  "nodes": [
+    {
+      "id": "node1",
+      "addr": "localhost:9001",
+      "key": "node1.key",
+      "pub_key": "e8f7e36826ea2e4312a29db9212e035e5b3e23ce2d26e71b910cc9757297e2bc"
+    },
+    {
+      "id": "node2",
+      "addr": "localhost:9002",
+      "key": "node2.key",
+      "pub_key": "bb789a290f7d623e65285f988a7bce6e619773c150fb2688d4ae2569151af268"
+    },
+    {
+      "id": "node3",
+      "addr": "localhost:9003",
+      "key": "node3.key",
+      "pub_key": "b3d2220d2935d8e8737fdd4a40ff7613bee60e76873d9cd019bb536808c82ae2"
+    }
+  ]
+}
