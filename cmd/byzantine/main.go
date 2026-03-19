@@ -60,6 +60,7 @@ func injectEntry(addr string, entry *log.LogEntry) error {
 }
 
 func main() {
+	// defaults to localhost:9001
     target := "localhost:9001"
     if len(os.Args) > 1 {
         target = os.Args[1]
