@@ -24,6 +24,7 @@ func GenerateKeyPair() (*KeyPair, error) {
 }
 
 func (kp *KeyPair) SaveToFile(path string) error {
+	// permissions set so only the owner can read it
     return os.WriteFile(path, []byte(hex.EncodeToString(kp.Private)), 0600)
 }
 
